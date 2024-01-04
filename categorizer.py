@@ -159,6 +159,15 @@ server_responses = {
     }
 }
 
+# Set patterns dictionary
+patterns = {
+    'crypto': [EVM_ADDRESS_PATTERN, BITCOIN_ADDRESS_PATTERN, LITECOIN_ADDRESS_PATTERN, 
+            DOGECOIN_ADDRESS_PATTERN, COSMOS_ADDRESS_PATTERN, CARDANO_ADDRESS_PATTERN, 
+            SOLANA_ADDRESS_PATTERN, XRP_ADDRESS_PATTERN],
+    'email': [email_pattern]
+}
+
+
 ######## ROUTES ##########
 
 # Home route
@@ -185,17 +194,11 @@ async def react_description(query: Query, request: Request, api_key: str = Depen
         'timestamp': convo_start
     })
 
-    # In the main function or wherever the logic is applied
+    # Apply nonsense filter
     if not user_input or nonsense(user_input):
         return handle_nonsense(locale)
-
-    patterns = {
-        'crypto': [EVM_ADDRESS_PATTERN, BITCOIN_ADDRESS_PATTERN, LITECOIN_ADDRESS_PATTERN, 
-                DOGECOIN_ADDRESS_PATTERN, COSMOS_ADDRESS_PATTERN, CARDANO_ADDRESS_PATTERN, 
-                SOLANA_ADDRESS_PATTERN, XRP_ADDRESS_PATTERN],
-        'email': [email_pattern]
-    }
-
+    
+    # Apply email & crypto addresses filter
     for context, pattern_list in patterns.items():
         if any(re.search(pattern, user_input, re.IGNORECASE) for pattern in pattern_list):
             return handle_crypto_email(locale, context)
