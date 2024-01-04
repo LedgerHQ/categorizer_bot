@@ -62,7 +62,7 @@ async def periodic_cleanup():
         await asyncio.sleep(TIMEOUT_SECONDS)
 
 # Improved startup event to use asyncio.create_task for the continuous background task
-@app.lifespan("startup")
+@app.on_event("startup")
 async def startup_event():
     asyncio.create_task(periodic_cleanup())
 
