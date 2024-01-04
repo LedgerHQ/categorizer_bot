@@ -239,7 +239,7 @@ async def react_description(query: Query, request: Request, api_key: str = Depen
 
                 # Format .json object
                 output_data = {
-                    "output": category,  
+                    "category": category,  
                     "time": timestamp   
                 }
                 print(output_data)
@@ -247,10 +247,10 @@ async def react_description(query: Query, request: Request, api_key: str = Depen
                 # Convert the output data to a string or a serialized format like JSON
                 output_json = json.dumps(output_data)
 
-                # Send the message to SQS
-                sqs_queue_url = 'your-sqs-queue-url'
-                send_message_response = send_message_to_sqs(sqs_queue_url, output_json)
-                print(send_message_response)
+                # # Send the message to SQS
+                # sqs_queue_url = 'your-sqs-queue-url'
+                # send_message_response = send_message_to_sqs(sqs_queue_url, output_json)
+                # print(send_message_response)
                         
                 return output_data
 
