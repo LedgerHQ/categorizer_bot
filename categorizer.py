@@ -197,8 +197,8 @@ async def react_description(query: Query, request: Request, api_key: str = Depen
                         max_tokens=50,
                     )
                 category = resp.choices[0].message.content.lower()
+                print("Category: " + category)
         
-
                 server_responses = {
                     "greetings": {
                         "fr": "Bonjour ! Comment puis-je vous aider avec vos problèmes liés à Ledger aujourd'hui ? Plus vous partagerez de détails sur votre problème, mieux je pourrai vous assister. ",
@@ -221,7 +221,6 @@ async def react_description(query: Query, request: Request, api_key: str = Depen
                 if category and category in server_responses:
                     return {"output": server_responses[category].get(locale, server_responses[category]["eng"])}
                 
-                print("Category: " + category)
                 return{"output": category, "time": timestamp}
 
             except Exception as e:
