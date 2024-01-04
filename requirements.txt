@@ -11,3 +11,4 @@ tiktoken
 bs4
 apscheduler
 asyncio
+boto3

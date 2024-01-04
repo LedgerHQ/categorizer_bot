@@ -1,4 +1,5 @@
 import os
+import json
 from dotenv import main
 from datetime import datetime
 from openai import OpenAI
@@ -10,6 +11,8 @@ from nostril import nonsense
 import re
 import time
 import asyncio
+import boto3
+from botocore.exceptions import NoCredentialsError
 
 
 # Initialize environment variables
@@ -24,6 +27,21 @@ async def get_api_key(api_key_header: str = Depends(api_key_header)):
     if not api_key_header or api_key_header.split(' ')[1] != server_api_key:
         raise HTTPException(status_code=401, detail="Could not validate credentials")
     return api_key_header
+
+# Initialize the SQS client
+sqs_client = boto3.client('sqs', region_name='your-region')
+
+# Function to send message to SQS
+def send_message_to_sqs(queue_url, message_body):
+    try:
+        response = sqs_client.send_message(
+            QueueUrl=queue_url,
+            MessageBody=message_body
+        )
+        return response
+    except NoCredentialsError:
+        print("Credentials not available")
+        return None
 
 # Define query class
 class Query(BaseModel):
@@ -132,6 +150,15 @@ def handle_crypto_email(locale, context):
     print('Email or crypto address detected!')
     return {'output': context_dict[context].get(locale, context_dict[context]['default'])}
 
+# Set server response dictionary
+server_responses = {
+    "greetings": {
+        "fr": "Bonjour ! Comment puis-je vous aider avec vos problèmes liés à Ledger aujourd'hui ? Plus vous partagerez de détails sur votre problème, mieux je pourrai vous assister. ",
+        "ru": "Здравствуйте! Как я могу помочь вам с вашими вопросами, связанными с Ledger, сегодня? Чем больше деталей вы предоставите о вашей проблеме, тем лучше я смогу вам помочь. Пожалуйста, опишите её максимально подробно!",
+        "eng": "Hello! How can I assist you with your Ledger-related issue today? The more details you share about the problem, the better I can assist you. Feel free to describe it in as much detail as possible!"
+    }
+}
+
 ######## ROUTES ##########
 
 # Home route
@@ -185,6 +212,7 @@ async def react_description(query: Query, request: Request, api_key: str = Depen
 
             try: 
                 
+                # Categorize query using finetuned GPT model
                 resp = client.chat.completions.create(
                         temperature=0.0,
                         model='ft:gpt-3.5-turbo-0613:ledger::8cZVgY5Q',
@@ -198,40 +226,38 @@ async def react_description(query: Query, request: Request, api_key: str = Depen
                     )
                 category = resp.choices[0].message.content.lower()
                 print("Category: " + category)
-        
-                server_responses = {
-                    "greetings": {
-                        "fr": "Bonjour ! Comment puis-je vous aider avec vos problèmes liés à Ledger aujourd'hui ? Plus vous partagerez de détails sur votre problème, mieux je pourrai vous assister. ",
-                        "ru": "Здравствуйте! Как я могу помочь вам с вашими вопросами, связанными с Ledger, сегодня? Чем больше деталей вы предоставите о вашей проблеме, тем лучше я смогу вам помочь. Пожалуйста, опишите её максимально подробно!",
-                        "eng": "Hello! How can I assist you with your Ledger-related issue today? The more details you share about the problem, the better I can assist you. Feel free to describe it in as much detail as possible!"
-                    }
-                    # "help": {
-                    #     "fr": "Bonjour ! Comment puis-je vous aider avec vos problèmes liés à Ledger aujourd'hui ? Plus vous partagerez de détails sur votre problème, mieux je pourrai vous assister. ",
-                    #     "ru": "Здравствуйте! Как я могу помочь вам с вашими вопросами, связанными с Ledger, сегодня? Чем больше деталей вы предоставите о вашей проблеме, тем лучше я смогу вам помочь. Пожалуйста, опишите её максимально подробно!",
-                    #     "eng": "Hello! How can I assist you with your Ledger-related issue today? The more details you share about the problem, the better I can assist you. Feel free to describe it in as much detail as possible!"
-                    # },
-                    # "agent": {
-                    #     "fr": "Pour parler à quelqu'un du support Ledger, cliquez simplement sur le bouton 'Parler à un agent'. Bonne journée !",
-                    #     "ru": "Конечно, чтобы поговорить с кем-то из службы поддержки Ledger, просто нажмите кнопку 'Поговорить с агентом'. Хорошего дня!",
-                    #     "eng": "Certainly! To speak with someone from Ledger Support, just click on the 'Speak to an Agent' button. Have a great day!"
-                    # }
-                }
 
-                # Use the dictionary to get the response
+                # Filter unwanted categories
                 if category and category in server_responses:
                     return {"output": server_responses[category].get(locale, server_responses[category]["eng"])}
                 
-                return{"output": category, "time": timestamp}
+                # Save the response to a thread
+                user_states[user_id] = {
+                    'previous_queries': user_states[user_id].get('previous_queries', []) + [(user_input)],
+                    'timestamp': time.time()
+                }
+
+                # Format .json object
+                output_data = {
+                    "output": category,  
+                    "time": timestamp   
+                }
+                print(output_data)
+
+                # Convert the output data to a string or a serialized format like JSON
+                output_json = json.dumps(output_data)
+
+                # Send the message to SQS
+                sqs_queue_url = 'your-sqs-queue-url'
+                send_message_response = send_message_to_sqs(sqs_queue_url, output_json)
+                print(send_message_response)
+                        
+                return output_data
 
             except Exception as e:
                 print(f"An error occurred: {e}")
                 print("Error in categorization")
                                    
-            # Save the response to a thread
-            user_states[user_id] = {
-                'previous_queries': user_states[user_id].get('previous_queries', []) + [(user_input)],
-                'timestamp': time.time()
-            }
     
         except ValueError as e:
             print(e)
