@@ -180,7 +180,7 @@ async def root():
 async def health_check():
     return {"status": "OK"}
 
-# RAG route
+# Categorizer route
 @app.post('/categorizer')
 async def react_description(query: Query, request: Request, api_key: str = Depends(get_api_key)): 
     user_id = query.user_id
@@ -188,10 +188,11 @@ async def react_description(query: Query, request: Request, api_key: str = Depen
     locale = query.user_locale if query.user_locale in SUPPORTED_LOCALES else "eng"
 
     # Create a conversation history for new users
-    convo_start = time.time()
+    timestamp = datetime.now().strftime("%B %d, %Y %H:%M:%S")
     user_states.setdefault(user_id, {
         'previous_queries': [],
-        'timestamp': convo_start
+        'timestamp': [],
+        'category': [],
     })
 
     # Apply nonsense filter
@@ -206,79 +207,71 @@ async def react_description(query: Query, request: Request, api_key: str = Depen
     else:
         
         try:
-            # Set clock
-            timestamp = datetime.now().strftime("%B %d, %Y %H:%M:%S")
+             
+            # Categorize query using finetuned GPT model
+            resp = client.chat.completions.create(
+                    temperature=0.0,
+                    model='ft:gpt-3.5-turbo-0613:ledger::8cZVgY5Q',
+                    seed=0,
+                    messages=[
+                        {"role": "system", "content": classifier_prompt},
+                        {"role": "user", "content": user_input}
+                    ],
+                    timeout=5.0,
+                    max_tokens=50,
+                )
+            category = resp.choices[0].message.content.lower()
+            print("Category: " + category)
 
-            # Prepare Cohere embeddings model based on locale
-            model = 'embed-multilingual-v3.0' if locale in ['fr', 'ru'] else 'embed-english-v3.0'
-            print("Embedding mode: " + model)
+            # Filter unwanted categories
+            if category and category in server_responses:
+                return {"output": server_responses[category].get(locale, server_responses[category]["eng"])}
+            
+            # Save the response to a thread
+            user_states[user_id] = {
+                'previous_queries': user_states[user_id].get('previous_queries', []) + [(user_input)],
+                'timestamp': user_states[user_id].get('timestamp', []) + [(timestamp)],
+                'category': user_states[user_id].get('category', []) + [(category)],
+            }
+            print(user_states)
 
-            try: 
-                
-                # Categorize query using finetuned GPT model
-                resp = client.chat.completions.create(
-                        temperature=0.0,
-                        model='ft:gpt-3.5-turbo-0613:ledger::8cZVgY5Q',
-                        seed=0,
-                        messages=[
-                            {"role": "system", "content": classifier_prompt},
-                            {"role": "user", "content": user_input}
-                        ],
-                        timeout=5.0,
-                        max_tokens=50,
-                    )
-                category = resp.choices[0].message.content.lower()
-                print("Category: " + category)
+            # Format .json object
+            output_data = {
+                "category": category,  
+                "time": timestamp   
+            }
+            print(output_data)
 
-                # Filter unwanted categories
-                if category and category in server_responses:
-                    return {"output": server_responses[category].get(locale, server_responses[category]["eng"])}
-                
-                # Save the response to a thread
-                user_states[user_id] = {
-                    'previous_queries': user_states[user_id].get('previous_queries', []) + [(user_input)],
-                    'timestamp': time.time()
-                }
+            # Convert the output data to a string or a serialized format like JSON
+            output_json = json.dumps(output_data)
 
-                # Format .json object
-                output_data = {
-                    "category": category,  
-                    "time": timestamp   
-                }
-                print(output_data)
+            # # Send the message to SQS
+            # sqs_queue_url = 'your-sqs-queue-url'
+            # send_message_response = send_message_to_sqs(sqs_queue_url, output_json)
+            # print(send_message_response)
+                    
+            return output_data
 
-                # Convert the output data to a string or a serialized format like JSON
-                output_json = json.dumps(output_data)
-
-                # # Send the message to SQS
-                # sqs_queue_url = 'your-sqs-queue-url'
-                # send_message_response = send_message_to_sqs(sqs_queue_url, output_json)
-                # print(send_message_response)
-                        
-                return output_data
-
-            except Exception as e:
-                print(f"An error occurred: {e}")
-                print("Error in categorization")
-                                   
-    
         except ValueError as e:
-            print(e)
-            raise HTTPException(status_code=400, detail="Snap! Something went wrong, please try again!")
-        
-        except HTTPException as e:
-            print(e)
-            # Handle known HTTP exceptions
+            # Log the error for debugging purposes
+            print(f"ValueError occurred: {e}")
             return JSONResponse(
-                status_code=e.status_code,
-                content={"message": e.detail},
+                status_code=400,
+                content={"message": "Invalid input or configuration error. Please check your request."}
+            )
+        except HTTPException as http_exc:
+            # Log the error for debugging purposes
+            print(f"HTTPException occurred: {http_exc.detail}")
+            return JSONResponse(
+                status_code=http_exc.status_code,
+                content={"message": http_exc.detail}
             )
         except Exception as e:
-            print(e)
-            # Handle other unexpected exceptions
+            # Log the error for debugging purposes
+            print(f"Unexpected error occurred: {e}")
             return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"message": "Snap! Something went wrong, please try again!"},
+                status_code=500,
+                content={"message": "An unexpected error occurred. Please try again later."}
             )
 
 # Local start command: uvicorn categorizer:app --reload --port 8800
