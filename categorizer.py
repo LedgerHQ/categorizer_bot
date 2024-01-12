@@ -128,7 +128,7 @@ async def cleanup_expired_states():
 # Define supported locales for data retrieval
 SUPPORTED_LOCALES = {'eng', 'fr', 'ru'}
 
-# Load classifier system prompt
+# Prepare classifier system prompt
 CLASSIFIER_PROMPT = """
 
 You are ClassifierBot, a simple yet highly specialized assistant tasked with reading customer queries directed at Ledger — the cryptocurrency hardware wallet company — and categorizing each query accordingly.
@@ -310,11 +310,11 @@ async def retrieve(query, locale, timestamp):
     
     # Construct the augmented query string with locale, contexts, chat history, and user input
     if locale == 'fr':
-        augmented_contexts = "CONTEXTE: " + "\n\n" + "La date d'aujourdh'hui est: " + timestamp + "\n\n" + "\n\n".join(contexts)
+        augmented_contexts = "La date d'aujourdh'hui est: " + timestamp + "\n\n" + "\n\n".join(contexts)
     elif locale == 'ru':
-        augmented_contexts = "КОНТЕКСТ: " + "\n\n" + "Сегодня: " + timestamp + "\n\n" + "\n\n".join(contexts)
+        augmented_contexts = "Сегодня: " + timestamp + "\n\n" + "\n\n".join(contexts)
     else:
-        augmented_contexts = "CONTEXT: " + "\n\n" + "Today is: " + timestamp + "\n\n" + "\n\n".join(contexts)
+        augmented_contexts = "Today is: " + timestamp + "\n\n" + "\n\n".join(contexts)
 
     return augmented_contexts
 
@@ -327,7 +327,8 @@ async def health_check():
 
 # Fetcher route
 @app.post('/pinecone')
-async def react_description(query: Query, api_key: str = Depends(get_fetcher_api_key)):
+#async def react_description(query: Query, api_key: str = Depends(get_fetcher_api_key)):
+async def react_description(query: Query):
     # Deconstruct incoming query
     user_id = query.user_id
     user_input = filter_and_replace_crypto(query.user_input.strip())
@@ -341,7 +342,7 @@ async def react_description(query: Query, api_key: str = Depends(get_fetcher_api
             # Set clock
             timestamp = datetime.now().strftime("%B %d, %Y")
             # Start date retrieval and reranking
-            data = await retrieve(user_id, locale, timestamp)
+            data = await retrieve(user_input, locale, timestamp)
             
             print(data + "\n\n")
             return data
