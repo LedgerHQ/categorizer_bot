@@ -24,6 +24,12 @@ main.load_dotenv()
 # Define FastAPI app
 app = FastAPI()
 
+# Define query class
+class Query(BaseModel):
+    user_input: str
+    user_id: str
+    user_locale: str | None = None
+
 # Initialize common variables
 API_KEY_NAME = os.environ['API_KEY_NAME']
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
@@ -58,12 +64,6 @@ def send_message_to_sqs(queue_url, message_body):
         print("Credentials not available")
         return None
 
-# Define query class
-class Query(BaseModel):
-    user_input: str
-    user_id: str
-    user_locale: str | None = None
-
 # Initialize Pinecone
 pinecone.init(api_key=os.environ['PINECONE_API_KEY'], environment=os.environ['PINECONE_ENVIRONMENT'])
 pinecone.whoami()
@@ -77,53 +77,6 @@ embed_model = "text-embedding-ada-002"
 # Initialize Cohere
 os.environ["COHERE_API_KEY"] = os.getenv("COHERE_API_KEY") 
 co = cohere.Client(os.environ["COHERE_API_KEY"])
-
-# Initialize email address detector
-email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-def find_emails(text):  
-    return re.findall(email_pattern, text)
-
-# Set up address filters:
-EVM_ADDRESS_PATTERN = r'\b0x[a-fA-F0-9]{40}\b|\b0x[a-fA-F0-9]{64}\b'
-BITCOIN_ADDRESS_PATTERN = r'\b(1|3)[1-9A-HJ-NP-Za-km-z]{25,34}\b|bc1[a-zA-Z0-9]{25,90}\b'
-LITECOIN_ADDRESS_PATTERN = r'\b(L|M)[a-km-zA-HJ-NP-Z1-9]{26,34}\b'
-DOGECOIN_ADDRESS_PATTERN = r'\bD{1}[5-9A-HJ-NP-U]{1}[1-9A-HJ-NP-Za-km-z]{32}\b'
-XRP_ADDRESS_PATTERN = r'\br[a-zA-Z0-9]{24,34}\b'
-COSMOS_ADDRESS_PATTERN = r'\bcosmos[0-9a-z]{38,45}\b'
-SOLANA_ADDRESS_PATTERN= r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'
-CARDANO_ADDRESS_PATTERN = r'\baddr1[0-9a-z]{58}\b'
-
-# Initialize user state and periodic cleanup function
-user_states = {}
-TIMEOUT_SECONDS = 600  # 10 minutes
-
-async def periodic_cleanup():
-    while True:
-        await cleanup_expired_states()
-        await asyncio.sleep(TIMEOUT_SECONDS)
-
-# Improved startup event to use asyncio.create_task for the continuous background task
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(periodic_cleanup())
-
-# Enhanced cleanup function with improved error logging
-async def cleanup_expired_states():
-    try:
-        current_time = time.time()
-        expired_users = [
-            user_id for user_id, state in user_states.items()
-            if current_time - state['timestamp'] > TIMEOUT_SECONDS
-        ]
-        for user_id in expired_users:
-            try:
-                del user_states[user_id]
-                print("User state deleted!")
-            except Exception as e:
-                print(f"Error during cleanup for user {user_id}: {e}")
-    except Exception as e:
-        print(f"General error during cleanup: {e}")
-
 
 # Define supported locales for data retrieval
 SUPPORTED_LOCALES = {'eng', 'fr', 'ru'}
@@ -180,6 +133,38 @@ CATEGORIES:
 """
 
 # Define helpers functions & dictionaries
+
+# Initialize user state and periodic cleanup function
+user_states = {}
+TIMEOUT_SECONDS = 1200  # 20 minutes
+
+async def periodic_cleanup():
+    while True:
+        await cleanup_expired_states()
+        await asyncio.sleep(TIMEOUT_SECONDS)
+
+# Improved startup event to use asyncio.create_task for the continuous background task
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(periodic_cleanup())
+
+# Enhanced cleanup function with improved error logging
+async def cleanup_expired_states():
+    try:
+        current_time = time.time()
+        expired_users = [
+            user_id for user_id, state in user_states.items()
+            if current_time - state['timestamp'] > TIMEOUT_SECONDS
+        ]
+        for user_id in expired_users:
+            try:
+                del user_states[user_id]
+                print("User state deleted!")
+            except Exception as e:
+                print(f"Error during cleanup for user {user_id}: {e}")
+    except Exception as e:
+        print(f"General error during cleanup: {e}")
+
 def handle_nonsense(locale):
     messages = {
         'fr': "Je suis désolé, je n'ai pas compris votre question et je ne peux pas aider avec des questions qui incluent des adresses de cryptomonnaie. Pourriez-vous s'il vous plaît fournir plus de détails ou reformuler sans l'adresse ? N'oubliez pas, je suis ici pour aider avec toute demande liée à Ledger.",
@@ -194,6 +179,21 @@ translations = {
     'ru': '\n\nУзнайте больше на',
     'fr': '\n\nPour en savoir plus'
 }
+
+# Initialize email address detector
+email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+def find_emails(text):  
+    return re.findall(email_pattern, text)
+
+# Set up address filters:
+EVM_ADDRESS_PATTERN = r'\b0x[a-fA-F0-9]{40}\b|\b0x[a-fA-F0-9]{64}\b'
+BITCOIN_ADDRESS_PATTERN = r'\b(1|3)[1-9A-HJ-NP-Za-km-z]{25,34}\b|bc1[a-zA-Z0-9]{25,90}\b'
+LITECOIN_ADDRESS_PATTERN = r'\b(L|M)[a-km-zA-HJ-NP-Z1-9]{26,34}\b'
+DOGECOIN_ADDRESS_PATTERN = r'\bD{1}[5-9A-HJ-NP-U]{1}[1-9A-HJ-NP-Za-km-z]{32}\b'
+XRP_ADDRESS_PATTERN = r'\br[a-zA-Z0-9]{24,34}\b'
+COSMOS_ADDRESS_PATTERN = r'\bcosmos[0-9a-z]{38,45}\b'
+SOLANA_ADDRESS_PATTERN= r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'
+CARDANO_ADDRESS_PATTERN = r'\baddr1[0-9a-z]{58}\b'
 
 # Patterns dictionary
 patterns = {
@@ -327,8 +327,7 @@ async def health_check():
 
 # Fetcher route
 @app.post('/pinecone')
-#async def react_description(query: Query, api_key: str = Depends(get_fetcher_api_key)):
-async def react_description(query: Query):
+async def react_description(query: Query, api_key: str = Depends(get_fetcher_api_key)):
     # Deconstruct incoming query
     user_id = query.user_id
     user_input = filter_and_replace_crypto(query.user_input.strip())
