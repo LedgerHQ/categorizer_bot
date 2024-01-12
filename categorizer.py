@@ -113,18 +113,57 @@ async def generic_exception_handler(request, exc):
 SUPPORTED_LOCALES = {'eng', 'fr', 'ru'}
 
 # Load classifier system prompt
-def load_categories():
-    filecat = f'classifier_prompt.txt'
-    try:
-        with open(filecat, 'r') as categories:
-            return categories.read()
-    except FileNotFoundError:
-        raise HTTPException(status_code=500, detail=f"Categories not found!")
+CLASSIFIER_PROMPT = """
 
-# Pre-load prompts
-classifier_prompt = load_categories()
+You are ClassifierBot, a simple yet highly specialized assistant tasked with reading customer queries directed at Ledger — the cryptocurrency hardware wallet company — and categorizing each query accordingly.
 
-# Define helpers functions
+The categories that you choose will be given to you in the following format: Category (CONTEXT that explains the category).
+
+You should ONLY return the category name WITHOUT any of the CONTEXT that explains the category.
+
+It's also VERY important to ONLY return one of the categories listed below, do NOT attempt to troubleshoot the issue or offer any advice.
+
+
+CATEGORIES:
+
+- Agent (Any user query that requests speaking with a human agent like 'speak to human', 'agent', 'operator', 'support', or 'representative')
+
+- Bitcoin (Any user query that specifically mentions Bitcoin or BTC)
+
+- Ethereum (Any user query that specifically mentions Ethereum or ETH)
+
+- Solana (Any user query that specifically mentions Solana or SOL)
+
+- XRP (Any user query that specifically mentions XPR)
+
+- Cardano (Any query that specifically mentions Cardano or ADA)
+
+- Tron (Any query that specifically mentions Tron or TRX)
+
+- Greetings (Any user query that's a greeting or general request for help such as 'hi', 'hi there' or 'hello')
+
+- Help (Any user query that's 'help' or 'I need help')
+
+- Swapping & Buying (Any user query that mentions swapping or buying crypto)
+
+- Order & Shipping (Any user query that mentions shipping a device, returning a device, replacing a device, issues with deliveries, and other issues in this category)
+
+- Ledger Device (Any user query that mentions issues with connecting a Nano S or Nano X device, hardware issues with a device, firmware issues with a device, or any other issues with our hardware products)
+
+- Ledger Live (Any user query that mentions issues with Ledger Live, synchronization issues, balance or graph issues, or any other issues with our software product)
+
+- Ledger Recover (Any user query that SPECIFICALLY mentions Ledger Recover, sharding a recovery phrase, paying for a subscription, or any other issues with the Ledger Recover product)
+
+- Staking (Any user query that mentions issues with staking, staking rewards, unstaking, delegating or undelegating coins)
+
+- Scam (Any user query that mentions a scam such as a fake version of Ledger Live, receiving an unwanted NFT voucher or unwanted tokens,  receiving a scam email asking them to activate 2FA or to synchronize their device, a "Ledger" employee asking them to share their 24-word recovery phrase, etc)
+
+- Other (Any user query that mentions the referral program, the affiliate program, the CL Card or Crypto Life Card, using Metamask or third-party dapp or wallet, or anything else not included in the other categories)
+
+
+"""
+
+# Define helpers functions & dictionaries
 def handle_nonsense(locale):
     messages = {
         'fr': "Je suis désolé, je n'ai pas compris votre question et je ne peux pas aider avec des questions qui incluent des adresses de cryptomonnaie. Pourriez-vous s'il vous plaît fournir plus de détails ou reformuler sans l'adresse ? N'oubliez pas, je suis ici pour aider avec toute demande liée à Ledger.",
@@ -134,30 +173,52 @@ def handle_nonsense(locale):
     print('Nonsense detected!')
     return {'output': messages.get(locale, messages['default'])}
 
-def handle_crypto_email(locale, context):
-    context_dict = {
-        'crypto': {
-            'fr': "Je suis désolé, mais je ne peux pas aider avec des questions qui incluent des adresses de cryptomonnaie. Veuillez retirer l'adresse et poser la question à nouveau.",
-            'ru': "Извините, но я не могу помочь с вопросами, которые включают адреса счетов криптовалюты. Пожалуйста, удалите адрес из вашего запроса и напишите ваш запрос еще раз.",
-            'default': "I'm sorry, but I can't assist with questions that include cryptocurrency addresses. Please remove the address and ask again"
-        },
-        'email': {
-            'fr': "Je suis désolé, mais je ne peux pas aider avec des questions qui incluent des adresses e-mail. Veuillez retirer l'adresse et poser la question à nouveau.",
-            'ru': "Извините, но я не могу ответить на вопросы, содержащие адреса электронной почты. Пожалуйста, удалите адрес электронной почты и задайте вопрос снова.",
-            'default': "I'm sorry, but I can't assist with questions that include email addresses. Please remove the address and ask again."
-        }
-    }
-    print('Email or crypto address detected!')
-    return {'output': context_dict[context].get(locale, context_dict[context]['default'])}
-
-# Set server response dictionary
-server_responses = {
-    "greetings": {
-        "fr": "Bonjour ! Comment puis-je vous aider avec vos problèmes liés à Ledger aujourd'hui ? Plus vous partagerez de détails sur votre problème, mieux je pourrai vous assister. ",
-        "ru": "Здравствуйте! Как я могу помочь вам с вашими вопросами, связанными с Ledger, сегодня? Чем больше деталей вы предоставите о вашей проблеме, тем лучше я смогу вам помочь. Пожалуйста, опишите её максимально подробно!",
-        "eng": "Hello! How can I assist you with your Ledger-related issue today? The more details you share about the problem, the better I can assist you. Feel free to describe it in as much detail as possible!"
-    }
+# Translations dictionary
+translations = {
+    'ru': '\n\nУзнайте больше на',
+    'fr': '\n\nPour en savoir plus'
 }
+
+# Patterns dictionary
+patterns = {
+    'crypto': [EVM_ADDRESS_PATTERN, BITCOIN_ADDRESS_PATTERN, LITECOIN_ADDRESS_PATTERN, 
+            DOGECOIN_ADDRESS_PATTERN, COSMOS_ADDRESS_PATTERN, CARDANO_ADDRESS_PATTERN, 
+            SOLANA_ADDRESS_PATTERN, XRP_ADDRESS_PATTERN],
+    'email': [email_pattern]
+}
+
+
+######## FUNCTIONS  ##########
+
+# Define exception handler function
+@app.exception_handler(Exception)
+async def generic_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"message": "Snap! Something went wrong, please try again!"},
+    )
+
+# Function to replace crypto addresses
+def replace_crypto_address(match):
+    full_address = match.group(0)
+    if match.lastindex is not None and match.lastindex >= 1:
+        prefix = match.group(1)  # Capture the prefix
+    else:
+        # Infer prefix based on the address pattern
+        if full_address.startswith("0x"):
+            prefix = "0x"
+        elif any(full_address.startswith(p) for p in ["L", "M", "D", "r", "cosmos", "addr1"]):
+            prefix = full_address.split('1', 1)[0] 
+        else:
+            prefix = ''
+    return prefix + 'xxxx'
+
+# Function to apply email & crypto addresses filter and replace addresses
+def filter_and_replace_crypto(user_input):
+    for ctxt, pattern_list in patterns.items():
+        for pattern in pattern_list:
+            user_input = re.sub(pattern, replace_crypto_address, user_input, flags=re.IGNORECASE)
+    return user_input
 
 # Set patterns dictionary
 patterns = {
@@ -170,11 +231,6 @@ patterns = {
 
 ######## ROUTES ##########
 
-# Home route
-@app.get("/")
-async def root():
-    return {"welcome": "You've reached the home route!"}
-
 # Health probe
 @app.get("/_health")
 async def health_check():
@@ -183,8 +239,10 @@ async def health_check():
 # Categorizer route
 @app.post('/categorizer')
 async def react_description(query: Query, api_key: str = Depends(get_api_key)): 
+
+    # Deconstruct incoming query
     user_id = query.user_id
-    user_input = query.user_input.strip()
+    user_input = filter_and_replace_crypto(query.user_input.strip())
     locale = query.user_locale if query.user_locale in SUPPORTED_LOCALES else "eng"
 
     # Create a conversation history for new users
@@ -198,11 +256,6 @@ async def react_description(query: Query, api_key: str = Depends(get_api_key)):
     # Apply nonsense filter
     if not user_input or nonsense(user_input):
         return handle_nonsense(locale)
-    
-    # Apply email & crypto addresses filter
-    for context, pattern_list in patterns.items():
-        if any(re.search(pattern, user_input, re.IGNORECASE) for pattern in pattern_list):
-            return handle_crypto_email(locale, context)
 
     else:
         
@@ -214,7 +267,7 @@ async def react_description(query: Query, api_key: str = Depends(get_api_key)):
                     model='ft:gpt-3.5-turbo-0613:ledger::8cZVgY5Q',
                     seed=0,
                     messages=[
-                        {"role": "system", "content": classifier_prompt},
+                        {"role": "system", "content": CLASSIFIER_PROMPT},
                         {"role": "user", "content": user_input}
                     ],
                     timeout=5.0,
@@ -222,11 +275,7 @@ async def react_description(query: Query, api_key: str = Depends(get_api_key)):
                 )
             category = resp.choices[0].message.content.lower()
             print("Category: " + category)
-
-            # Filter unwanted categories
-            if category and category in server_responses:
-                return {"output": server_responses[category].get(locale, server_responses[category]["eng"])}
-            
+      
             # Save the response to a thread
             user_states[user_id] = {
                 'previous_queries': user_states[user_id].get('previous_queries', []) + [(user_input)],
