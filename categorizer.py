@@ -3,7 +3,7 @@ import json
 from dotenv import main
 from datetime import datetime
 from openai import OpenAI
-from fastapi import FastAPI, Request, HTTPException, status, Depends
+from fastapi import FastAPI, HTTPException, status, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from fastapi.security import APIKeyHeader
@@ -11,6 +11,9 @@ from nostril import nonsense
 import re
 import time
 import asyncio
+import pinecone
+import cohere
+import traceback
 import boto3
 from botocore.exceptions import NoCredentialsError
 
@@ -18,15 +21,27 @@ from botocore.exceptions import NoCredentialsError
 # Initialize environment variables
 main.load_dotenv()
 
-# Initialize backend & API keys
-server_api_key=os.environ['BACKEND_API_KEY'] 
-API_KEY_NAME=os.environ['API_KEY_NAME'] 
+# Define FastAPI app
+app = FastAPI()
+
+# Initialize common variables
+API_KEY_NAME = os.environ['API_KEY_NAME']
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
-async def get_api_key(api_key_header: str = Depends(api_key_header)):
-    if not api_key_header or api_key_header.split(' ')[1] != server_api_key:
+# Generic function to validate API keys
+async def get_api_key(api_key_header: str = Depends(api_key_header), expected_key: str = ""):
+    if not api_key_header or api_key_header.split(' ')[1] != expected_key:
         raise HTTPException(status_code=401, detail="Could not validate credentials")
     return api_key_header
+
+# Specific functions for each API key
+async def get_cat_api_key(api_key_header: str = Depends(api_key_header)):
+    server_api_key = os.environ['BACKEND_API_KEY']
+    return await get_api_key(api_key_header, server_api_key)
+
+async def get_fetcher_api_key(api_key_header: str = Depends(api_key_header)):
+    fetcher_api_key = os.environ['FETCHER_API_KEY']
+    return await get_api_key(api_key_header, fetcher_api_key)
 
 # Initialize the SQS client
 sqs_client = boto3.client('sqs', region_name='your-region')
@@ -49,11 +64,19 @@ class Query(BaseModel):
     user_id: str
     user_locale: str | None = None
 
-# Define FastAPI app
-app = FastAPI()
+# Initialize Pinecone
+pinecone.init(api_key=os.environ['PINECONE_API_KEY'], environment=os.environ['PINECONE_ENVIRONMENT'])
+pinecone.whoami()
+index_name = 'prod'
+index = pinecone.Index(index_name)
 
 # Initialize OpenAI client & Embedding model
 client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
+embed_model = "text-embedding-ada-002"
+
+# Initialize Cohere
+os.environ["COHERE_API_KEY"] = os.getenv("COHERE_API_KEY") 
+co = cohere.Client(os.environ["COHERE_API_KEY"])
 
 # Initialize email address detector
 email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
@@ -101,13 +124,6 @@ async def cleanup_expired_states():
     except Exception as e:
         print(f"General error during cleanup: {e}")
 
-# Define exception handler function
-@app.exception_handler(Exception)
-async def generic_exception_handler(request, exc):
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"message": "Snap! Something went wrong, please try again!"},
-    )
 
 # Define supported locales for data retrieval
 SUPPORTED_LOCALES = {'eng', 'fr', 'ru'}
@@ -191,11 +207,23 @@ patterns = {
 ######## FUNCTIONS  ##########
 
 # Define exception handler function
-@app.exception_handler(Exception)
-async def generic_exception_handler(request, exc):
+async def handle_exception(exc):
+    if isinstance(exc, ValueError):
+        error_message = "Invalid input or configuration error. Please check your request."
+        status_code = 400
+    elif isinstance(exc, HTTPException):
+        error_message = exc.detail
+        status_code = exc.status_code
+    else:
+        error_message = "An unexpected error occurred. Please try again later."
+        status_code = 500
+
+    # Log the detailed error for debugging
+    traceback.print_exc()
+
     return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"message": "Snap! Something went wrong, please try again!"},
+        status_code=status_code,
+        content={"message": error_message}
     )
 
 # Function to replace crypto addresses
@@ -220,14 +248,75 @@ def filter_and_replace_crypto(user_input):
             user_input = re.sub(pattern, replace_crypto_address, user_input, flags=re.IGNORECASE)
     return user_input
 
-# Set patterns dictionary
-patterns = {
-    'crypto': [EVM_ADDRESS_PATTERN, BITCOIN_ADDRESS_PATTERN, LITECOIN_ADDRESS_PATTERN, 
-            DOGECOIN_ADDRESS_PATTERN, COSMOS_ADDRESS_PATTERN, CARDANO_ADDRESS_PATTERN, 
-            SOLANA_ADDRESS_PATTERN, XRP_ADDRESS_PATTERN],
-    'email': [email_pattern]
-}
+# Retrieve and re-rank function
+async def retrieve(query, locale, timestamp):
+    # Define context box
+    contexts = []
 
+    # Prepare Cohere embeddings 
+    try:
+        # Choose Cohere embeddings model based on locale
+        embedding_model = 'embed-multilingual-v3.0' if locale in ['fr', 'ru'] else 'embed-english-v3.0'
+        # Call the embedding function
+        res_embed = co.embed(
+            texts=[query],
+            model=embedding_model,
+            input_type='search_query'
+        )
+    # Catch errors
+    except Exception as e:
+        print(f"Embedding failed: {e}")
+
+    # Grab the embeddings from the response object
+    xq = res_embed.embeddings
+
+    # Pulls top N chunks from Pinecone
+    res_query = index.query(xq, top_k=8, namespace=locale, include_metadata=True)
+
+    # Format docs from Pinecone
+    learn_more_text = translations.get(locale, '\n\nLearn more at')
+    # Docs with URLs returned
+    docs = [{"text": f"{x['metadata']['text']}{learn_more_text}: {x['metadata'].get('source', 'N/A')}"} 
+        for i, x in enumerate(res_query["matches"])]
+            
+    # Try re-ranking with Cohere
+    try:
+        
+        # Dynamically choose reranker model based on locale
+        reranker_model = 'rerank-multilingual-v2.0' if locale in ['fr', 'ru'] else 'rerank-english-v2.0'
+
+        # Rerank docs with Cohere and build reranked list with top N chunks
+        rerank_docs = co.rerank(
+            query=query, 
+            documents=docs, 
+            top_n=3, 
+            model=reranker_model
+        )
+        
+        # Construct the contexts with the top reranked document
+        reranked = rerank_docs[0].document["text"]
+        contexts.append(reranked)
+
+    except Exception as e:
+        print(f"Reranking failed: {e}")
+        # Fallback to simpler retrieval without Cohere if reranking fails
+        res_query = index.query(xq, top_k=2, namespace=locale, include_metadata=True)
+        sorted_items = sorted([item for item in res_query['matches'] if item['score'] > 0.50], key=lambda x: x['score'], reverse=True)
+
+        for idx, item in enumerate(sorted_items):
+            context = item['metadata']['text']
+            context += "\nLearn more: " + item['metadata'].get('source', 'N/A')
+            contexts.append(context)
+    
+    # Construct the augmented query string with locale, contexts, chat history, and user input
+    if locale == 'fr':
+        augmented_contexts = "CONTEXTE: " + "\n\n" + "La date d'aujourdh'hui est: " + timestamp + "\n\n" + "\n\n".join(contexts)
+    elif locale == 'ru':
+        augmented_contexts = "КОНТЕКСТ: " + "\n\n" + "Сегодня: " + timestamp + "\n\n" + "\n\n".join(contexts)
+    else:
+        augmented_contexts = "CONTEXT: " + "\n\n" + "Today is: " + timestamp + "\n\n" + "\n\n".join(contexts)
+
+    return augmented_contexts
 
 ######## ROUTES ##########
 
@@ -236,9 +325,33 @@ patterns = {
 async def health_check():
     return {"status": "OK"}
 
+# Fetcher route
+@app.post('/pinecone')
+async def react_description(query: Query, api_key: str = Depends(get_fetcher_api_key)):
+    # Deconstruct incoming query
+    user_id = query.user_id
+    user_input = filter_and_replace_crypto(query.user_input.strip())
+    locale = query.user_locale if query.user_locale in SUPPORTED_LOCALES else "eng"
+
+    # Apply nonsense filter
+    if not user_input or nonsense(user_input):
+        return handle_nonsense(locale)
+    else:
+        try:
+            # Set clock
+            timestamp = datetime.now().strftime("%B %d, %Y")
+            # Start date retrieval and reranking
+            data = await retrieve(user_id, locale, timestamp)
+            
+            print(data + "\n\n")
+            return data
+
+        except Exception as e:
+            return handle_exception(e)
+
 # Categorizer route
 @app.post('/categorizer')
-async def react_description(query: Query, api_key: str = Depends(get_api_key)): 
+async def react_description(query: Query, api_key: str = Depends(get_cat_api_key)): 
 
     # Deconstruct incoming query
     user_id = query.user_id
@@ -300,27 +413,8 @@ async def react_description(query: Query, api_key: str = Depends(get_api_key)):
             # print(send_message_response)
                     
             return output_data
-
-        except ValueError as e:
-            # Log the error for debugging purposes
-            print(f"ValueError occurred: {e}")
-            return JSONResponse(
-                status_code=400,
-                content={"message": "Invalid input or configuration error. Please check your request."}
-            )
-        except HTTPException as http_exc:
-            # Log the error for debugging purposes
-            print(f"HTTPException occurred: {http_exc.detail}")
-            return JSONResponse(
-                status_code=http_exc.status_code,
-                content={"message": http_exc.detail}
-            )
+        
         except Exception as e:
-            # Log the error for debugging purposes
-            print(f"Unexpected error occurred: {e}")
-            return JSONResponse(
-                status_code=500,
-                content={"message": "An unexpected error occurred. Please try again later."}
-            )
+            return handle_exception(e)
 
 # Local start command: uvicorn categorizer:app --reload --port 8800
