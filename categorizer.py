@@ -2,7 +2,7 @@ import os
 import json
 from dotenv import main
 from datetime import datetime
-from openai import OpenAI
+from openai import AsyncOpenAI
 from fastapi import FastAPI, HTTPException, status, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -71,7 +71,7 @@ index_name = 'prod'
 index = pinecone.Index(index_name)
 
 # Initialize OpenAI client & Embedding model
-client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
+client = AsyncOpenAI(api_key=os.environ['OPENAI_API_KEY'])
 embed_model = "text-embedding-ada-002"
 
 # Initialize Cohere
@@ -375,7 +375,7 @@ async def react_description(query: Query, api_key: str = Depends(get_cat_api_key
         try:
              
             # Categorize query using finetuned GPT model
-            resp = client.chat.completions.create(
+            resp = await client.chat.completions.create(
                     temperature=0.0,
                     model='ft:gpt-3.5-turbo-0613:ledger::8cZVgY5Q',
                     seed=0,
