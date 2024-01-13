@@ -71,7 +71,7 @@ index_name = 'prod'
 index = pinecone.Index(index_name)
 
 # Initialize OpenAI client & Embedding model
-client = AsyncOpenAI(api_key=os.environ['OPENAI_API_KEY'])
+openai_client = AsyncOpenAI(api_key=os.environ['OPENAI_API_KEY'])
 embed_model = "text-embedding-ada-002"
 
 # Initialize Cohere
@@ -375,7 +375,7 @@ async def react_description(query: Query, api_key: str = Depends(get_cat_api_key
         try:
              
             # Categorize query using finetuned GPT model
-            resp = await client.chat.completions.create(
+            resp = await openai_client.chat.completions.create(
                     temperature=0.0,
                     model='ft:gpt-3.5-turbo-0613:ledger::8cZVgY5Q',
                     seed=0,
