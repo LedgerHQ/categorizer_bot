@@ -15,6 +15,7 @@ import pinecone
 import cohere
 import traceback
 import boto3
+import httpx
 from botocore.exceptions import NoCredentialsError
 
 
@@ -65,18 +66,19 @@ def send_message_to_sqs(queue_url, message_body):
         return None
 
 # Initialize Pinecone
-pinecone.init(api_key=os.environ['PINECONE_API_KEY'], environment=os.environ['PINECONE_ENVIRONMENT'])
+pinecone_key = os.environ['PINECONE_API_KEY']
+pinecone.init(api_key=pinecone_key, environment=os.environ['PINECONE_ENVIRONMENT'])
 pinecone.whoami()
 index_name = 'prod'
 index = pinecone.Index(index_name)
 
 # Initialize OpenAI client & Embedding model
-openai_client = AsyncOpenAI(api_key=os.environ['OPENAI_API_KEY'])
-embed_model = "text-embedding-ada-002"
+openai_key = os.environ['OPENAI_API_KEY']
+openai_client = AsyncOpenAI(api_key=openai_key)
 
 # Initialize Cohere
-os.environ["COHERE_API_KEY"] = os.getenv("COHERE_API_KEY") 
 co = cohere.Client(os.environ["COHERE_API_KEY"])
+cohere_key = os.environ["COHERE_API_KEY"]
 
 # Define supported locales for data retrieval
 SUPPORTED_LOCALES = {'eng', 'fr', 'ru'}
@@ -253,60 +255,116 @@ async def retrieve(query, locale, timestamp):
     # Define context box
     contexts = []
 
-    # Prepare Cohere embeddings 
-    try:
-        # Choose Cohere embeddings model based on locale
-        embedding_model = 'embed-multilingual-v3.0' if locale in ['fr', 'ru'] else 'embed-english-v3.0'
-        # Call the embedding function
-        res_embed = co.embed(
-            texts=[query],
-            model=embedding_model,
-            input_type='search_query'
-        )
-    # Catch errors
-    except Exception as e:
-        print(f"Embedding failed: {e}")
-
-    # Grab the embeddings from the response object
-    xq = res_embed.embeddings
-
-    # Pulls top N chunks from Pinecone
-    res_query = index.query(xq, top_k=8, namespace=locale, include_metadata=True)
-
-    # Format docs from Pinecone
-    learn_more_text = translations.get(locale, '\n\nLearn more at')
-    # Docs with URLs returned
-    docs = [{"text": f"{x['metadata']['text']}{learn_more_text}: {x['metadata'].get('source', 'N/A')}"} 
-        for i, x in enumerate(res_query["matches"])]
+    async with httpx.AsyncClient() as client:
+        # Prepare Cohere embeddings
+        try:
+            # Choose Cohere embeddings model based on locale
+            embedding_model = 'embed-multilingual-v3.0' if locale in ['fr', 'ru'] else 'embed-english-v3.0'
             
-    # Try re-ranking with Cohere
-    try:
+            # Call the embedding function
+            embed_response = await client.post(
+                "https://api.cohere.ai/v1/embed",
+                json={
+
+                    "texts": [query], 
+                    "model": embedding_model, 
+                    "input_type": "search_query",
+
+                },
+                headers={
+
+                    "Authorization": f"Bearer {cohere_key}"
+                },
+                timeout=20,
+            )
+
+            embed_response.raise_for_status()
+            res_embed = embed_response.json()
+            xq = res_embed['embeddings']
         
-        # Dynamically choose reranker model based on locale
-        reranker_model = 'rerank-multilingual-v2.0' if locale in ['fr', 'ru'] else 'rerank-english-v2.0'
+        except Exception as e:
+            print(f"Embedding failed: {e}")
+            return(e)
 
-        # Rerank docs with Cohere and build reranked list with top N chunks
-        rerank_docs = co.rerank(
-            query=query, 
-            documents=docs, 
-            top_n=3, 
-            model=reranker_model
-        )
+        # Example Pinecone query replacement
+        try:
+            # Pull data chunks from Pinecone
+            pinecone_response = await client.post(
+                "https://prod-e865e64.svc.northamerica-northeast1-gcp.pinecone.io/query",
+                json={
+
+                    "vector": xq, 
+                    "topK": 8, 
+                    "namespace": locale,
+                    "includeValues": False, 
+                    "includeMetadata": True
+
+                },
+                headers={
+
+                    "Api-Key": pinecone_key,
+                    "Accept": "application/json",
+                    "Content-Type": "application/json" 
+
+                },
+                timeout=25,
+            )
+            pinecone_response.raise_for_status()
+            res_query = pinecone_response.json()
+
+            # Format docs from Pinecone response
+            learn_more_text = translations.get(locale, '\n\nLearn more at')
+            docs = [{"text": f"{x['metadata']['text']}{learn_more_text}: {x['metadata'].get('source', 'N/A')}"} 
+                for x in res_query["matches"]]
+
+
         
-        # Construct the contexts with the top reranked document
-        reranked = rerank_docs[0].document["text"]
-        contexts.append(reranked)
+        except Exception as e:
+            print(f"Pinecone query failed: {e}")
+            return
 
-    except Exception as e:
-        print(f"Reranking failed: {e}")
-        # Fallback to simpler retrieval without Cohere if reranking fails
-        res_query = index.query(xq, top_k=2, namespace=locale, include_metadata=True)
-        sorted_items = sorted([item for item in res_query['matches'] if item['score'] > 0.50], key=lambda x: x['score'], reverse=True)
+        # Try re-ranking with Cohere
+        try:
+            # Dynamically choose reranker model based on locale
+            reranker_model = 'rerank-multilingual-v2.0' if locale in ['fr', 'ru'] else 'rerank-english-v2.0'
 
-        for idx, item in enumerate(sorted_items):
-            context = item['metadata']['text']
-            context += "\nLearn more: " + item['metadata'].get('source', 'N/A')
-            contexts.append(context)
+            # Rerank docs with Cohere
+            rerank_response = await client.post(
+                "https://api.cohere.ai/v1/rerank",
+                json={
+
+                    "model": reranker_model,
+                    "query": query, 
+                    "documents": docs, 
+                    "top_n": 3,
+                    "return_documents": True,
+
+                },
+                headers={
+
+                    "Authorization": f"Bearer {cohere_key}",
+
+                },
+                timeout=30,
+            )
+            rerank_response.raise_for_status()
+            rerank_docs = rerank_response.json()
+
+            # Process reranked documents
+            reranked = rerank_docs['results'][0]['document']['text']
+            contexts.append(reranked)
+
+        except Exception as e:
+            print(f"Reranking failed: {e}")
+            # Fallback to simpler retrieval without Cohere if reranking fails
+            res_query = index.query(xq, top_k=2, namespace=locale, include_metadata=True)
+            sorted_items = sorted([item for item in res_query['matches'] if item['score'] > 0.50], key=lambda x: x['score'], reverse=True)
+
+            for idx, item in enumerate(sorted_items):
+                context = item['metadata']['text']
+                context_url = "\nLearn more: " + item['metadata'].get('source', 'N/A')
+                context += context_url
+                contexts.append(context)
     
     # Construct the augmented query string with locale, contexts, chat history, and user input
     if locale == 'fr':
