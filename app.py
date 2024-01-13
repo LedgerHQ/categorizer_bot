@@ -65,18 +65,18 @@ def send_message_to_sqs(queue_url, message_body):
         print("Credentials not available")
         return None
 
-# Initialize Pinecone & keys
+# Initialize Pinecone & key
 pinecone_key = os.environ['PINECONE_API_KEY']
 pinecone.init(api_key=pinecone_key, environment=os.environ['PINECONE_ENVIRONMENT'])
 pinecone.whoami()
 index_name = 'prod'
 index = pinecone.Index(index_name)
 
-# Initialize OpenAI client & keys
+# Initialize OpenAI client & key
 openai_key = os.environ['OPENAI_API_KEY']
 openai_client = AsyncOpenAI(api_key=openai_key)
 
-# Initialize Cohere & keys
+# Initialize Cohere & key
 co = cohere.Client(os.environ["COHERE_API_KEY"])
 cohere_key = os.environ["COHERE_API_KEY"]
 
